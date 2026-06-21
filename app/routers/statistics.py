@@ -7,7 +7,16 @@ from sqlalchemy import func, and_
 
 from app.database import get_db
 from app.models import Turbine, Alert, AlertStatus, AlertLevel, RiskChain, RiskChainStatus
-from app.risk_chain_engine import get_level_rank
+from app.alert_rules import (
+    get_level_rank,
+    is_high_risk,
+    calculate_risk_score,
+    count_high_risk,
+    filter_active,
+    filter_closed,
+    HIGH_RISK_LEVELS,
+    CHAIN_RISK_SCORE_MULTIPLIER,
+)
 from app.schemas import (
     StatisticsResponse,
     RidgeRiskDistribution,
@@ -48,13 +57,13 @@ def get_statistics(
     high_risk_alerts = db.query(func.count(Alert.id)).filter(
         and_(
             Alert.triggered_at >= start_date,
-            Alert.alert_level.in_([AlertLevel.HIGH, AlertLevel.CRITICAL])
+            Alert.alert_level.in_(HIGH_RISK_LEVELS)
         )
     ).scalar()
     active_high_risk_alerts = db.query(func.count(Alert.id)).filter(
         and_(
             Alert.status.in_([AlertStatus.PENDING, AlertStatus.PROCESSING]),
-            Alert.alert_level.in_([AlertLevel.HIGH, AlertLevel.CRITICAL])
+            Alert.alert_level.in_(HIGH_RISK_LEVELS)
         )
     ).scalar()
 
@@ -142,23 +151,17 @@ def _get_ridge_risk_distribution(
             )
         ).all()
 
-        active_alerts = [a for a in alerts if a.status in [AlertStatus.PENDING, AlertStatus.PROCESSING]]
-        closed_alerts_list = [a for a in alerts if a.status == AlertStatus.CLOSED]
+        active_alerts = filter_active(alerts)
+        closed_alerts_list = filter_closed(alerts)
 
         alert_count = len(alerts)
-        high_risk_count = sum(
-            1 for a in alerts
-            if a.alert_level in [AlertLevel.HIGH, AlertLevel.CRITICAL]
-        )
+        high_risk_count = count_high_risk(alerts)
 
         active_alert_count = len(active_alerts)
-        active_high_risk_count = sum(
-            1 for a in active_alerts
-            if a.alert_level in [AlertLevel.HIGH, AlertLevel.CRITICAL]
-        )
+        active_high_risk_count = count_high_risk(active_alerts)
 
-        risk_score = alert_count * 1 + high_risk_count * 2
-        active_risk_score = active_alert_count * 1 + active_high_risk_count * 2
+        risk_score = calculate_risk_score(alert_count, high_risk_count)
+        active_risk_score = calculate_risk_score(active_alert_count, active_high_risk_count)
         closed_alert_count = len(closed_alerts_list)
 
         risk_chains = db.query(RiskChain).filter(
@@ -168,17 +171,18 @@ def _get_ridge_risk_distribution(
             )
         ).all()
 
-        active_chain_count = sum(
-            1 for c in risk_chains
+        active_chains = [
+            c for c in risk_chains
             if c.status in [RiskChainStatus.ACTIVE, RiskChainStatus.ESCALATING, RiskChainStatus.STABILIZED]
-        )
+        ]
+        active_chain_count = len(active_chains)
         high_risk_chain_count = sum(
             1 for c in risk_chains
-            if c.current_level in [AlertLevel.HIGH, AlertLevel.CRITICAL]
+            if is_high_risk(c.current_level)
             and c.status != RiskChainStatus.CLOSED
         )
         chain_risk_score = sum(
-            (get_level_rank(c.current_level) + 1) * 2
+            (get_level_rank(c.current_level) + 1) * CHAIN_RISK_SCORE_MULTIPLIER
             for c in risk_chains
             if c.status != RiskChainStatus.CLOSED
         )
@@ -221,7 +225,7 @@ def _get_high_risk_periods(
     for alert in alerts:
         hour = alert.triggered_at.hour
         hour_data[hour]["alert_count"] += 1
-        if alert.alert_level in [AlertLevel.HIGH, AlertLevel.CRITICAL]:
+        if is_high_risk(alert.alert_level):
             hour_data[hour]["high_risk_count"] += 1
 
     result = []
@@ -255,8 +259,8 @@ def _get_repeated_alert_turbines(
         if len(alerts) >= min_alerts:
             alert_types = sorted(list(set(a.alert_type.value for a in alerts)))
 
-            active_alerts_list = [a for a in alerts if a.status in [AlertStatus.PENDING, AlertStatus.PROCESSING]]
-            closed_alerts_list = [a for a in alerts if a.status == AlertStatus.CLOSED]
+            active_alerts_list = filter_active(alerts)
+            closed_alerts_list = filter_closed(alerts)
             active_alert_types = sorted(list(set(a.alert_type.value for a in active_alerts_list)))
 
             risk_chains = db.query(RiskChain).filter(

@@ -14,6 +14,7 @@ from app.models import (
     RiskChainStatus,
     Turbine
 )
+from app.alert_rules import get_level_rank
 
 
 RISK_EVOLUTION_ORDER = [
@@ -37,19 +38,6 @@ def is_risk_escalation(prev_type: AlertType, new_type: AlertType) -> bool:
     prev_rank = get_risk_severity_rank(prev_type)
     new_rank = get_risk_severity_rank(new_type)
     return new_rank > prev_rank
-
-
-def get_level_rank(level: AlertLevel) -> int:
-    level_order = [
-        AlertLevel.LOW,
-        AlertLevel.MEDIUM,
-        AlertLevel.HIGH,
-        AlertLevel.CRITICAL
-    ]
-    try:
-        return level_order.index(level)
-    except ValueError:
-        return -1
 
 
 @dataclass

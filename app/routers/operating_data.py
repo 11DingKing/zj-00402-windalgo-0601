@@ -12,7 +12,8 @@ from app.schemas import (
     BatchDataResponse
 )
 from app.alert_engine import AlertRuleEngine
-from app.risk_chain_engine import RiskChainEngine, get_level_rank
+from app.risk_chain_engine import RiskChainEngine
+from app.alert_rules import get_level_rank
 
 router = APIRouter(prefix="/operating-data")
 
