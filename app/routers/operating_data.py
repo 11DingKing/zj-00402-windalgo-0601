@@ -11,6 +11,7 @@ from app.schemas import (
     BatchDataResponse
 )
 from app.alert_engine import AlertRuleEngine
+from app.risk_chain_engine import RiskChainEngine
 
 router = APIRouter(prefix="/operating-data")
 
@@ -46,13 +47,22 @@ def create_operating_data(
         )
         db.add(alert)
         db.flush()
+
+        chain_result = RiskChainEngine.process_alert(db, alert, turbine)
+
         generated_alerts.append({
             "alert_id": alert.id,
             "alert_type": result.alert_type.value,
             "alert_level": result.alert_level.value,
             "trigger_reason": result.trigger_reason,
-            "suggestion": result.suggestion
+            "suggestion": result.suggestion,
+            "risk_chain_id": alert.risk_chain_id,
+            "risk_chain_code": chain_result.risk_chain.chain_code,
+            "is_new_chain": chain_result.is_new_chain,
+            "is_escalation": chain_result.is_escalation
         })
+
+    RiskChainEngine.check_and_close_stale_chains(db)
 
     db.commit()
     db.refresh(operating_data)
@@ -97,10 +107,14 @@ def create_operating_data_batch(
                 triggered_at=datetime.utcnow()
             )
             db.add(alert)
+            db.flush()
+
+            RiskChainEngine.process_alert(db, alert, turbine)
             alerts_generated += 1
 
         records_processed += 1
 
+    RiskChainEngine.check_and_close_stale_chains(db)
     db.commit()
 
     return BatchDataResponse(

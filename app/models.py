@@ -50,6 +50,7 @@ class Turbine(Base):
 
     operating_data = relationship("OperatingData", back_populates="turbine")
     alerts = relationship("Alert", back_populates="turbine")
+    risk_chains = relationship("RiskChain", back_populates="turbine")
 
 
 class OperatingData(Base):
@@ -97,6 +98,7 @@ class Alert(Base):
     id = Column(Integer, primary_key=True, index=True)
     turbine_id = Column(Integer, ForeignKey("turbines.id"), nullable=False)
     operating_data_id = Column(Integer, ForeignKey("operating_data.id"), nullable=False)
+    risk_chain_id = Column(Integer, ForeignKey("risk_chains.id"), nullable=True)
     alert_type = Column(Enum(AlertType), nullable=False, index=True)
     alert_level = Column(Enum(AlertLevel), nullable=False, index=True)
     status = Column(Enum(AlertStatus), default=AlertStatus.PENDING, index=True)
@@ -109,6 +111,7 @@ class Alert(Base):
     turbine = relationship("Turbine", back_populates="alerts")
     operating_data = relationship("OperatingData", back_populates="alerts")
     handling_records = relationship("AlertHandling", back_populates="alert")
+    risk_chain = relationship("RiskChain", back_populates="alerts")
 
 
 class AlertHandling(Base):
@@ -122,3 +125,50 @@ class AlertHandling(Base):
     handled_at = Column(DateTime, default=datetime.utcnow)
 
     alert = relationship("Alert", back_populates="handling_records")
+
+
+class RiskChainStatus(str, enum.Enum):
+    ACTIVE = "演化中"
+    STABILIZED = "趋稳"
+    ESCALATING = "升级中"
+    CLOSED = "已关闭"
+
+
+class RiskChain(Base):
+    __tablename__ = "risk_chains"
+
+    id = Column(Integer, primary_key=True, index=True)
+    turbine_id = Column(Integer, ForeignKey("turbines.id"), nullable=False, index=True)
+    chain_code = Column(String(50), unique=True, index=True, nullable=False)
+    status = Column(Enum(RiskChainStatus), default=RiskChainStatus.ACTIVE, index=True)
+    current_phase = Column(Enum(AlertType), nullable=False)
+    current_level = Column(Enum(AlertLevel), nullable=False)
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    last_updated_at = Column(DateTime, default=datetime.utcnow)
+    closed_at = Column(DateTime)
+    close_condition = Column(String(200))
+    close_note = Column(Text)
+    total_alerts = Column(Integer, default=0)
+    escalation_count = Column(Integer, default=0)
+    overall_suggestion = Column(Text)
+
+    turbine = relationship("Turbine", back_populates="risk_chains")
+    phases = relationship("RiskPhase", back_populates="risk_chain", order_by="RiskPhase.phase_index")
+    alerts = relationship("Alert", back_populates="risk_chain")
+
+
+class RiskPhase(Base):
+    __tablename__ = "risk_phases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    risk_chain_id = Column(Integer, ForeignKey("risk_chains.id"), nullable=False, index=True)
+    phase_index = Column(Integer, nullable=False)
+    alert_type = Column(Enum(AlertType), nullable=False)
+    alert_level = Column(Enum(AlertLevel), nullable=False)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime)
+    trigger_reason = Column(Text)
+    phase_suggestion = Column(Text)
+    is_escalation = Column(Integer, default=0)
+
+    risk_chain = relationship("RiskChain", back_populates="phases")

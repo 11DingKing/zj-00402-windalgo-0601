@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import engine, Base
-from app.routers import turbines, operating_data, alerts, statistics
+from app.routers import turbines, operating_data, alerts, statistics, risk_chains
 
 Base.metadata.create_all(bind=engine)
 
@@ -25,6 +25,7 @@ app.include_router(turbines.router, prefix=settings.API_V1_STR, tags=["机组管
 app.include_router(operating_data.router, prefix=settings.API_V1_STR, tags=["运行数据"])
 app.include_router(alerts.router, prefix=settings.API_V1_STR, tags=["告警管理"])
 app.include_router(statistics.router, prefix=settings.API_V1_STR, tags=["统计分析"])
+app.include_router(risk_chains.router, prefix=settings.API_V1_STR, tags=["风险链"])
 
 
 @app.get("/", tags=["系统"])

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Alert, AlertStatus, AlertHandling, HandlingType, Turbine, AlertLevel
+from app.models import Alert, AlertStatus, AlertHandling, HandlingType, Turbine, AlertLevel, RiskChain, RiskChainStatus
 from app.schemas import (
     Alert as AlertSchema,
     AlertHandlingCreate,
@@ -92,6 +92,9 @@ def handle_alert(
         alert.closed_at = datetime.utcnow()
         alert.close_note = handling_in.note or f"{handling_in.handling_type.value}"
 
+    if alert.risk_chain_id:
+        _sync_risk_chain_status(db, alert.risk_chain_id)
+
     db.commit()
     db.refresh(alert)
 
@@ -147,6 +150,9 @@ def close_alert(
     alert.closed_at = datetime.utcnow()
     alert.close_note = note or "手动关闭"
 
+    if alert.risk_chain_id:
+        _sync_risk_chain_status(db, alert.risk_chain_id)
+
     db.commit()
     db.refresh(alert)
 
@@ -155,3 +161,33 @@ def close_alert(
         message="告警已关闭",
         alert=alert
     )
+
+
+def _sync_risk_chain_status(db: Session, risk_chain_id: int):
+    chain = db.query(RiskChain).filter(RiskChain.id == risk_chain_id).first()
+    if not chain or chain.status == RiskChainStatus.CLOSED:
+        return
+
+    alerts = chain.alerts
+    if not alerts:
+        return
+
+    pending_or_processing = [
+        a for a in alerts
+        if a.status in [AlertStatus.PENDING, AlertStatus.PROCESSING]
+    ]
+
+    if not pending_or_processing:
+        chain.status = RiskChainStatus.CLOSED
+        chain.closed_at = datetime.utcnow()
+        chain.close_condition = "所有关联告警均已处置完成"
+        if chain.phases:
+            last_phase = chain.phases[-1]
+            if not last_phase.ended_at:
+                last_phase.ended_at = datetime.utcnow()
+    else:
+        has_processing = any(
+            a.status == AlertStatus.PROCESSING for a in alerts
+        )
+        if has_processing and chain.status == RiskChainStatus.ESCALATING:
+            chain.status = RiskChainStatus.ACTIVE

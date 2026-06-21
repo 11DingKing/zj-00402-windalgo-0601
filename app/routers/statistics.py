@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 
 from app.database import get_db
-from app.models import Turbine, Alert, AlertStatus, AlertLevel
+from app.models import Turbine, Alert, AlertStatus, AlertLevel, RiskChain, RiskChainStatus
+from app.risk_chain_engine import get_level_rank
 from app.schemas import (
     StatisticsResponse,
     RidgeRiskDistribution,
@@ -39,6 +40,20 @@ def get_statistics(
         )
     ).scalar()
 
+    total_risk_chains = db.query(func.count(RiskChain.id)).filter(
+        RiskChain.started_at >= start_date
+    ).scalar()
+    active_risk_chains = db.query(func.count(RiskChain.id)).filter(
+        RiskChain.status.in_([
+            RiskChainStatus.ACTIVE,
+            RiskChainStatus.ESCALATING,
+            RiskChainStatus.STABILIZED
+        ])
+    ).scalar()
+    escalating_risk_chains = db.query(func.count(RiskChain.id)).filter(
+        RiskChain.status == RiskChainStatus.ESCALATING
+    ).scalar()
+
     ridge_distributions = _get_ridge_risk_distribution(db, start_date)
     high_risk_periods = _get_high_risk_periods(db, start_date)
     repeated_alert_turbines = _get_repeated_alert_turbines(db, start_date)
@@ -48,6 +63,9 @@ def get_statistics(
         total_alerts=total_alerts or 0,
         pending_alerts=pending_alerts or 0,
         high_risk_alerts=high_risk_alerts or 0,
+        total_risk_chains=total_risk_chains or 0,
+        active_risk_chains=active_risk_chains or 0,
+        escalating_risk_chains=escalating_risk_chains or 0,
         ridge_distributions=ridge_distributions,
         high_risk_periods=high_risk_periods,
         repeated_alert_turbines=repeated_alert_turbines
@@ -110,12 +128,37 @@ def _get_ridge_risk_distribution(
 
         risk_score = alert_count * 1 + high_risk_count * 2
 
+        risk_chains = db.query(RiskChain).filter(
+            and_(
+                RiskChain.turbine_id == turbine.id,
+                RiskChain.started_at >= start_date
+            )
+        ).all()
+
+        active_chain_count = sum(
+            1 for c in risk_chains
+            if c.status in [RiskChainStatus.ACTIVE, RiskChainStatus.ESCALATING, RiskChainStatus.STABILIZED]
+        )
+        high_risk_chain_count = sum(
+            1 for c in risk_chains
+            if c.current_level in [AlertLevel.HIGH, AlertLevel.CRITICAL]
+            and c.status != RiskChainStatus.CLOSED
+        )
+        chain_risk_score = sum(
+            (get_level_rank(c.current_level) + 1) * 2
+            for c in risk_chains
+            if c.status != RiskChainStatus.CLOSED
+        )
+
         ridge_data[turbine.ridge_name].append(RiskDistributionItem(
             turbine_code=turbine.turbine_code,
             position=turbine.position,
             alert_count=alert_count,
             high_risk_count=high_risk_count,
-            risk_score=round(risk_score, 2)
+            risk_score=round(risk_score, 2),
+            active_risk_chain_count=active_chain_count,
+            high_risk_chain_count=high_risk_chain_count,
+            chain_risk_score=round(chain_risk_score, 2)
         ))
 
     result = []
@@ -174,11 +217,31 @@ def _get_repeated_alert_turbines(
 
         if len(alerts) >= min_alerts:
             alert_types = sorted(list(set(a.alert_type.value for a in alerts)))
+
+            risk_chains = db.query(RiskChain).filter(
+                and_(
+                    RiskChain.turbine_id == turbine.id,
+                    RiskChain.started_at >= start_date
+                )
+            ).all()
+
+            active_chains = sum(
+                1 for c in risk_chains
+                if c.status in [RiskChainStatus.ACTIVE, RiskChainStatus.ESCALATING, RiskChainStatus.STABILIZED]
+            )
+            max_phases = max([len(c.phases) for c in risk_chains], default=0)
+            has_escalation = any(
+                c.escalation_count > 0 for c in risk_chains
+            )
+
             result.append(RepeatedAlertTurbine(
                 turbine_code=turbine.turbine_code,
                 ridge_name=turbine.ridge_name,
                 total_alerts=len(alerts),
-                alert_types=alert_types
+                alert_types=alert_types,
+                active_risk_chains=active_chains,
+                max_chain_phases=max_phases,
+                has_escalation_chain=has_escalation
             ))
 
     return sorted(result, key=lambda x: x.total_alerts, reverse=True)

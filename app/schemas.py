@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field
 
-from app.models import AlertType, AlertLevel, AlertStatus, HandlingType
+from app.models import AlertType, AlertLevel, AlertStatus, HandlingType, RiskChainStatus
 
 
 class TurbineBase(BaseModel):
@@ -94,6 +94,7 @@ class Alert(AlertBase):
     id: int
     turbine_id: int
     operating_data_id: int
+    risk_chain_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -130,6 +131,9 @@ class RiskDistributionItem(BaseModel):
     alert_count: int
     high_risk_count: int
     risk_score: float
+    active_risk_chain_count: int = 0
+    high_risk_chain_count: int = 0
+    chain_risk_score: float = 0.0
 
 
 class RidgeRiskDistribution(BaseModel):
@@ -148,6 +152,9 @@ class RepeatedAlertTurbine(BaseModel):
     ridge_name: str
     total_alerts: int
     alert_types: List[str]
+    active_risk_chains: int = 0
+    max_chain_phases: int = 0
+    has_escalation_chain: bool = False
 
 
 class StatisticsResponse(BaseModel):
@@ -155,6 +162,9 @@ class StatisticsResponse(BaseModel):
     total_alerts: int
     pending_alerts: int
     high_risk_alerts: int
+    total_risk_chains: int
+    active_risk_chains: int
+    escalating_risk_chains: int
     ridge_distributions: List[RidgeRiskDistribution]
     high_risk_periods: List[HighRiskPeriodItem]
     repeated_alert_turbines: List[RepeatedAlertTurbine]
@@ -165,3 +175,63 @@ class BatchDataResponse(BaseModel):
     records_processed: int
     alerts_generated: int
     message: str
+
+
+class RiskPhaseBase(BaseModel):
+    phase_index: int
+    alert_type: AlertType
+    alert_level: AlertLevel
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    trigger_reason: Optional[str] = None
+    phase_suggestion: Optional[str] = None
+    is_escalation: int = 0
+
+
+class RiskPhase(RiskPhaseBase):
+    id: int
+    risk_chain_id: int
+
+    class Config:
+        from_attributes = True
+
+
+class RiskChainBase(BaseModel):
+    turbine_code: Optional[str] = None
+    chain_code: str
+    status: RiskChainStatus
+    current_phase: AlertType
+    current_level: AlertLevel
+    started_at: Optional[datetime] = None
+    last_updated_at: Optional[datetime] = None
+    closed_at: Optional[datetime] = None
+    close_condition: Optional[str] = None
+    close_note: Optional[str] = None
+    total_alerts: int = 0
+    escalation_count: int = 0
+    overall_suggestion: Optional[str] = None
+
+
+class RiskChain(RiskChainBase):
+    id: int
+    turbine_id: int
+    phases: List[RiskPhase] = []
+
+    class Config:
+        from_attributes = True
+
+
+class RiskChainDetail(RiskChain):
+    alerts: List[Alert] = []
+
+
+class RiskChainCloseRequest(BaseModel):
+    close_note: Optional[str] = None
+    close_condition: Optional[str] = None
+    operator: str
+
+
+class RiskChainListResponse(BaseModel):
+    total: int
+    items: List[RiskChain]
+
