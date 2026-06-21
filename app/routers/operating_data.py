@@ -1,19 +1,69 @@
 from typing import List
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 
 from app.database import get_db
-from app.models import Turbine, OperatingData, Alert, AlertStatus
+from app.models import Turbine, OperatingData, Alert, AlertStatus, AlertLevel, RiskChain
 from app.schemas import (
     OperatingDataCreate,
     OperatingData as OperatingDataSchema,
     BatchDataResponse
 )
 from app.alert_engine import AlertRuleEngine
-from app.risk_chain_engine import RiskChainEngine
+from app.risk_chain_engine import RiskChainEngine, get_level_rank
 
 router = APIRouter(prefix="/operating-data")
+
+DUPLICATE_ALERT_WINDOW_MINUTES = 30
+
+
+def _find_or_merge_alert(
+    db: Session,
+    turbine_id: int,
+    operating_data_id: int,
+    alert_type,
+    alert_level,
+    trigger_reason: str,
+    suggestion: str,
+    triggered_at: datetime
+):
+    cutoff_time = triggered_at - timedelta(minutes=DUPLICATE_ALERT_WINDOW_MINUTES)
+
+    existing_alert = db.query(Alert).filter(
+        and_(
+            Alert.turbine_id == turbine_id,
+            Alert.alert_type == alert_type,
+            Alert.status.in_([AlertStatus.PENDING, AlertStatus.PROCESSING]),
+            Alert.triggered_at >= cutoff_time
+        )
+    ).order_by(Alert.triggered_at.desc()).first()
+
+    if existing_alert:
+        if get_level_rank(alert_level) > get_level_rank(existing_alert.alert_level):
+            existing_alert.alert_level = alert_level
+            existing_alert.suggestion = suggestion
+        existing_alert.trigger_reason = trigger_reason
+        existing_alert.triggered_at = triggered_at
+        existing_alert.operating_data_id = operating_data_id
+        is_new = False
+        return existing_alert, is_new
+    else:
+        alert = Alert(
+            turbine_id=turbine_id,
+            operating_data_id=operating_data_id,
+            alert_type=alert_type,
+            alert_level=alert_level,
+            status=AlertStatus.PENDING,
+            trigger_reason=trigger_reason,
+            suggestion=suggestion,
+            triggered_at=triggered_at
+        )
+        db.add(alert)
+        db.flush()
+        is_new = True
+        return alert, is_new
 
 
 @router.post("", response_model=List[dict], summary="上报运行数据并触发告警检测")
@@ -35,31 +85,39 @@ def create_operating_data(
     generated_alerts = []
 
     for result in alert_results:
-        alert = Alert(
-            turbine_id=turbine.id,
-            operating_data_id=operating_data.id,
-            alert_type=result.alert_type,
-            alert_level=result.alert_level,
-            status=AlertStatus.PENDING,
-            trigger_reason=result.trigger_reason,
-            suggestion=result.suggestion,
-            triggered_at=datetime.utcnow()
+        now = datetime.utcnow()
+        alert, is_new_alert = _find_or_merge_alert(
+            db, turbine.id, operating_data.id,
+            result.alert_type, result.alert_level,
+            result.trigger_reason, result.suggestion, now
         )
-        db.add(alert)
-        db.flush()
 
-        chain_result = RiskChainEngine.process_alert(db, alert, turbine)
+        if is_new_alert:
+            chain_result = RiskChainEngine.process_alert(db, alert, turbine)
+            risk_chain_code = chain_result.risk_chain.chain_code
+            is_new_chain = chain_result.is_new_chain
+            is_escalation = chain_result.is_escalation
+        else:
+            risk_chain_code = None
+            is_new_chain = False
+            is_escalation = False
+            if alert.risk_chain_id:
+                chain = db.query(RiskChain).filter(RiskChain.id == alert.risk_chain_id).first()
+                if chain:
+                    risk_chain_code = chain.chain_code
+                    chain.last_updated_at = now
 
         generated_alerts.append({
             "alert_id": alert.id,
             "alert_type": result.alert_type.value,
-            "alert_level": result.alert_level.value,
-            "trigger_reason": result.trigger_reason,
-            "suggestion": result.suggestion,
+            "alert_level": alert.alert_level.value,
+            "trigger_reason": alert.trigger_reason,
+            "suggestion": alert.suggestion,
             "risk_chain_id": alert.risk_chain_id,
-            "risk_chain_code": chain_result.risk_chain.chain_code,
-            "is_new_chain": chain_result.is_new_chain,
-            "is_escalation": chain_result.is_escalation
+            "risk_chain_code": risk_chain_code,
+            "is_new_chain": is_new_chain,
+            "is_escalation": is_escalation,
+            "is_merged_alert": not is_new_alert
         })
 
     RiskChainEngine.check_and_close_stale_chains(db)
@@ -96,21 +154,21 @@ def create_operating_data_batch(
 
         alert_results = AlertRuleEngine.analyze(operating_data, turbine)
         for result in alert_results:
-            alert = Alert(
-                turbine_id=turbine.id,
-                operating_data_id=operating_data.id,
-                alert_type=result.alert_type,
-                alert_level=result.alert_level,
-                status=AlertStatus.PENDING,
-                trigger_reason=result.trigger_reason,
-                suggestion=result.suggestion,
-                triggered_at=datetime.utcnow()
+            now = datetime.utcnow()
+            alert, is_new_alert = _find_or_merge_alert(
+                db, turbine.id, operating_data.id,
+                result.alert_type, result.alert_level,
+                result.trigger_reason, result.suggestion, now
             )
-            db.add(alert)
-            db.flush()
 
-            RiskChainEngine.process_alert(db, alert, turbine)
-            alerts_generated += 1
+            if is_new_alert:
+                RiskChainEngine.process_alert(db, alert, turbine)
+                alerts_generated += 1
+            else:
+                if alert.risk_chain_id:
+                    chain = db.query(RiskChain).filter(RiskChain.id == alert.risk_chain_id).first()
+                    if chain:
+                        chain.last_updated_at = now
 
         records_processed += 1
 

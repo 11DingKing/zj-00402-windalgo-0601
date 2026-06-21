@@ -131,6 +131,10 @@ class RiskDistributionItem(BaseModel):
     alert_count: int
     high_risk_count: int
     risk_score: float
+    active_alert_count: int = 0
+    active_high_risk_count: int = 0
+    active_risk_score: float = 0.0
+    closed_alert_count: int = 0
     active_risk_chain_count: int = 0
     high_risk_chain_count: int = 0
     chain_risk_score: float = 0.0
@@ -152,6 +156,9 @@ class RepeatedAlertTurbine(BaseModel):
     ridge_name: str
     total_alerts: int
     alert_types: List[str]
+    active_alerts: int = 0
+    active_alert_types: List[str] = []
+    closed_alerts: int = 0
     active_risk_chains: int = 0
     max_chain_phases: int = 0
     has_escalation_chain: bool = False
@@ -161,7 +168,11 @@ class StatisticsResponse(BaseModel):
     total_turbines: int
     total_alerts: int
     pending_alerts: int
+    processing_alerts: int
+    closed_alerts: int
+    active_alerts: int
     high_risk_alerts: int
+    active_high_risk_alerts: int
     total_risk_chains: int
     active_risk_chains: int
     escalating_risk_chains: int

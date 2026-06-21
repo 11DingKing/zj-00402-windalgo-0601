@@ -1,7 +1,8 @@
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 
 from app.database import get_db
 from app.models import Alert, AlertStatus, AlertHandling, HandlingType, Turbine, AlertLevel, RiskChain, RiskChainStatus
@@ -13,6 +14,57 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/alerts")
+
+RELATED_ALERT_WINDOW_HOURS = 24
+
+
+def _cascade_update_related_alerts(
+    db: Session,
+    source_alert: Alert,
+    target_status: AlertStatus,
+    handling_type: HandlingType,
+    operator: str,
+    note: Optional[str] = None
+) -> List[int]:
+    cutoff_time = source_alert.triggered_at - timedelta(hours=RELATED_ALERT_WINDOW_HOURS)
+
+    related_alerts = db.query(Alert).filter(
+        and_(
+            Alert.turbine_id == source_alert.turbine_id,
+            Alert.alert_type == source_alert.alert_type,
+            Alert.id != source_alert.id,
+            Alert.status.in_([AlertStatus.PENDING, AlertStatus.PROCESSING]),
+            Alert.triggered_at >= cutoff_time
+        )
+    ).all()
+
+    updated_ids = []
+    now = datetime.utcnow()
+
+    for alert in related_alerts:
+        if alert.status == target_status:
+            continue
+
+        handling_record = AlertHandling(
+            alert_id=alert.id,
+            handling_type=handling_type,
+            operator=operator,
+            note=note or f"级联处置：同源告警#{source_alert.id}已{target_status.value}",
+            handled_at=now
+        )
+        db.add(handling_record)
+
+        alert.status = target_status
+        if target_status == AlertStatus.CLOSED:
+            alert.closed_at = now
+            alert.close_note = note or f"级联关闭：同源告警#{source_alert.id}已关闭"
+
+        if alert.risk_chain_id:
+            _sync_risk_chain_status(db, alert.risk_chain_id)
+
+        updated_ids.append(alert.id)
+
+    return updated_ids
 
 
 @router.get("", response_model=List[AlertSchema], summary="查询告警列表")
@@ -79,18 +131,30 @@ def handle_alert(
     )
     db.add(handling_record)
 
+    target_status = None
     if handling_in.handling_type in [
         HandlingType.SHUTDOWN_INSPECTION,
         HandlingType.LOAD_REDUCED
     ]:
-        alert.status = AlertStatus.PROCESSING
+        target_status = AlertStatus.PROCESSING
     elif handling_in.handling_type in [
         HandlingType.FALSE_ALARM,
         HandlingType.RESUMED_OPERATION
     ]:
-        alert.status = AlertStatus.CLOSED
+        target_status = AlertStatus.CLOSED
         alert.closed_at = datetime.utcnow()
         alert.close_note = handling_in.note or f"{handling_in.handling_type.value}"
+
+    alert.status = target_status
+
+    cascaded_ids = []
+    if target_status:
+        cascaded_ids = _cascade_update_related_alerts(
+            db, alert, target_status,
+            handling_in.handling_type,
+            handling_in.operator,
+            handling_in.note
+        )
 
     if alert.risk_chain_id:
         _sync_risk_chain_status(db, alert.risk_chain_id)
@@ -105,9 +169,11 @@ def handle_alert(
         HandlingType.RESUMED_OPERATION: "已恢复运行"
     }
 
+    cascaded_msg = f"，级联处理 {len(cascaded_ids)} 条同源告警" if cascaded_ids else ""
+
     return AlertHandlingResponse(
         success=True,
-        message=f"告警{status_text.get(handling_in.handling_type, '处理成功')}",
+        message=f"告警{status_text.get(handling_in.handling_type, '处理成功')}{cascaded_msg}",
         alert=alert
     )
 
@@ -150,15 +216,24 @@ def close_alert(
     alert.closed_at = datetime.utcnow()
     alert.close_note = note or "手动关闭"
 
+    cascaded_ids = _cascade_update_related_alerts(
+        db, alert, AlertStatus.CLOSED,
+        HandlingType.RESUMED_OPERATION,
+        operator,
+        note
+    )
+
     if alert.risk_chain_id:
         _sync_risk_chain_status(db, alert.risk_chain_id)
 
     db.commit()
     db.refresh(alert)
 
+    cascaded_msg = f"，级联关闭 {len(cascaded_ids)} 条同源告警" if cascaded_ids else ""
+
     return AlertHandlingResponse(
         success=True,
-        message="告警已关闭",
+        message=f"告警已关闭{cascaded_msg}",
         alert=alert
     )
 
